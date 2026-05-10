@@ -38,10 +38,9 @@ jobs:
       contents: write
 
     steps:
-          # ──────────────────────────────────────
+      # ──────────────────────────────────────
       # قدم اول: حذف پوشه downloads (درست مثل دکمه Delete directory)
       # ──────────────────────────────────────
-
       - name: 🗑️ حذف پوشهٔ downloads (درست مثل Delete directory)
         if: github.event.inputs.clean_previous == 'true'
         env:
@@ -93,7 +92,7 @@ jobs:
             echo "$PATCH_RESULT"
             exit 1
           fi
-     
+
       # ──────────────────────────────────────
       # قدم دوم: دریافت شاخه (حالا سبک)
       # ──────────────────────────────────────
@@ -351,7 +350,96 @@ jobs:
           python3 telegram_downloader.py
 
       # ──────────────────────────────────────
-      # قدم ششم: ارسال فایل‌ها به مخزن
+      # قدم ششم: ساخت/به‌روزرسانی Links.md
+      # ──────────────────────────────────────
+      - name: 📝 ساخت/به‌روزرسانی Links.md
+        run: |
+          REPO="${{ github.repository }}"
+          BRANCH="${GITHUB_REF_NAME}"
+          JSON_FILE="downloads/.download_results.json"
+
+          if [ ! -f "$JSON_FILE" ]; then
+            echo "⚠️ فایل اطلاعاتی یافت نشد. Links.md به‌روزرسانی نمی‌شود."
+            exit 0
+          fi
+
+          python3 << PYEOF
+          import json, os, urllib.parse
+          from datetime import datetime, timezone, timedelta
+
+          repo = os.environ["REPO"]
+          branch = os.environ["BRANCH"]
+          json_path = "downloads/.download_results.json"
+
+          with open(json_path, "r") as f:
+              files = json.load(f)
+
+          ir_tz = timezone(timedelta(hours=3, minutes=30))
+          now = datetime.now(timezone.utc).astimezone(ir_tz).strftime("%Y-%m-%d %H:%M IR")
+
+          header = "## 🔗 Direct Download Links\n> Click on any link below to start downloading directly.<br><br/>\n\n"
+          new_entries = [f"### 📅 {now}"]
+
+          for f in files:
+              fname = os.path.basename(f["file"])
+              encoded = urllib.parse.quote(fname)
+              raw_url = f"https://github.com/{repo}/raw/{branch}/downloads/{encoded}"
+              # اگر فایل در زیرپوشه باشد (مثلاً downloads/Folder/file) باید مسیر را کامل گذاشت
+              sub_path = f["file"]
+              if "/" in sub_path:
+                  # مسیر نسبی داخل downloads/ را encode می‌کنیم
+                  parts = sub_path.split("/")
+                  encoded_path = "/".join(urllib.parse.quote(p, safe='') for p in parts)
+                  raw_url = f"https://github.com/{repo}/raw/{branch}/downloads/{encoded_path}"
+
+              # محاسبه حجم خوانا
+              size = f["size"]
+              if size >= 1048576:
+                  size_str = f"{size/1048576:.1f}MB"
+              elif size >= 1024:
+                  size_str = f"{size//1024}KB"
+              else:
+                  size_str = f"{size}B"
+
+              # تشخیص آیکون
+              ext = fname.rsplit(".", 1)[-1] if "." in fname else ""
+              icon = "📥"
+              if ext == "apk": icon = "📱"
+              elif ext in ("mp4", "mkv", "avi", "mov"): icon = "🎬"
+              elif ext in ("mp3", "m4a", "flac", "ogg"): icon = "🎵"
+              elif ext == "zip" or ext.startswith("z"): icon = "🗜️"
+
+              # نام نمایشی: حذف پسوندهای split اضافی برای زیبایی (اختیاری)
+              display = fname
+              # اگر فایل zip اصلی نبود و split داشت، نام اصلی را می‌توان ساده‌تر کرد (اما مهم نیست)
+
+              new_entries.append(f"- {icon} [{display}]({raw_url}) `{size_str}`")
+
+          new_content = "\n".join(new_entries) + "\n\n---\n\n"
+
+          # خواندن محتوای قبلی Links.md در صورت وجود
+          old_content = ""
+          if os.path.exists("Links.md"):
+              with open("Links.md", "r") as f:
+                  old = f.read()
+              # skip header line and blank lines? We'll keep old content after header removal
+              # اما ایده بهتر: old_content را از خط ۴ به بعد نگه داریم تا هدر قبلی تکرار نشود
+              lines = old.splitlines()
+              if len(lines) > 3 and lines[0].startswith("## 🔗"):
+                  old_content = "\n".join(lines[3:]) + "\n"
+              else:
+                  old_content = old
+
+          with open("Links.md", "w") as f:
+              f.write(header)
+              f.write(new_content)
+              f.write(old_content)
+
+          print("✅ Links.md با موفقیت به‌روزرسانی شد.")
+          PYEOF
+
+      # ──────────────────────────────────────
+      # قدم هفتم: ارسال فایل‌ها به مخزن
       # ──────────────────────────────────────
       - name: 📤 ارسال فایل‌های جدید به مخزن
         run: |
@@ -364,13 +452,14 @@ jobs:
           fi
 
           find downloads -type f ! -name "*.partial" ! -name ".download_results.json" -exec git add {} \;
+          git add Links.md   # اضافه کردن فایل لینک‌ها
 
           if git diff --cached --quiet; then
             echo "✅ فایل جدیدی برای commit وجود ندارد."
             exit 0
           fi
 
-          git commit -m "Add downloaded files [skip ci]"
+          git commit -m "Add downloaded files & update Links.md [skip ci]"
 
           for attempt in 1 2 3; do
             if git push origin ${{ github.ref_name }} 2>&1; then
